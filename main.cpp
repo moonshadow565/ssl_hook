@@ -10,23 +10,19 @@
 #include <string>
 #include <thread>
 #include "MinHook.h"
-#ifndef NDEBUG
-#error "Compile in release mode"
-#endif
-#ifdef WIN32
+
+#ifndef WIN32
+static_assert(sizeof(void*) == 8, "Compile in 64bit mode only!");
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#else
 static_assert(sizeof(void*) == 4, "Compile in 32bit mode");
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include <WinSock2.h>
-#else
-static_assert(sizeof(void*) == 8, "Compile in 64bit mode only!");
-#error "implement GetBaseAddress for not WIN32"
 #endif
-#ifdef assert
-#undef assert
-#endif
-#define assert(what) do { if (!(what)) { logger.log_fail(#what); exit(1); } } while(false)
 
 struct Logger {
 private:
@@ -96,16 +92,16 @@ public:
         memset(&addr, 0, sizeof(addr));
         addrlen = sizeof(addr);
         if (getpeername(fd, &addr.addr, &addrlen) != 0) {
-            send({"fd_peer",  (uintptr_t)s, t, (uint32_t)fd, 0}, nullptr);
+            send({"fd_peer", (uintptr_t)s, t, (uint32_t)fd, 0}, nullptr);
         } else {
-            send({"fd_peer",  (uintptr_t)s, t, (uint32_t)fd, (uint32_t)addrlen}, &addr);
+            send({"fd_peer", (uintptr_t)s, t, (uint32_t)fd, (uint32_t)addrlen}, &addr);
         }
         memset(&addr, 0, sizeof(addr));
         addrlen = sizeof(addr);
         if (getsockname(fd, &addr.addr, &addrlen) != 0) {
-            send({"fd_sock",  (uintptr_t)s, t, (uint32_t)fd, 0}, nullptr);
+            send({"fd_sock", (uintptr_t)s, t, (uint32_t)fd, 0}, nullptr);
         } else {
-            send({"fd_sock",  (uintptr_t)s, t, (uint32_t)fd, (uint32_t)addrlen}, &addr);
+            send({"fd_sock", (uintptr_t)s, t, (uint32_t)fd, (uint32_t)addrlen}, &addr);
         }
     }
 
@@ -126,6 +122,8 @@ public:
         return file.good();
     }
 };
+
+#define assert(what) do { if (!(what)) { logger.log_fail(#what); exit(1); } } while(false)
 
 static Logger logger = {};
 extern "C" {
@@ -155,6 +153,41 @@ extern "C" {
     }
 }
 
+#ifndef WIN32
+template<typename T>
+static bool hook_fn(char const* name, T* hook, T*& org) noexcept {
+    void* trgt = nullptr;
+    if (MH_CreateHookApiEx(nullptr, name, (void*)hook, (void**)&org, &trgt) != MH_OK) {
+        return false;
+    }
+    if (MH_EnableHook(trgt) != MH_OK) {
+        return false;
+    }
+    return true;
+}
+
+struct Init {
+    Init() {
+        auto folder = std::filesystem::path("./ssl_logs");
+        if (!std::filesystem::exists(folder)) {
+            std::error_code ec = {};
+            std::filesystem::create_directories(folder, ec);
+            if (ec != std::errc{}) {
+                exit(1);
+            }
+        }
+        if (!logger.open_folder(folder)) {
+            exit(1);
+        }
+        assert(MH_Initialize() == MH_OK);
+        assert(hook_fn("ssl_read_internal", &ssl_read_internal_hook, ssl_read_internal_org));
+        assert(hook_fn("ssl_write_internal", &ssl_write_internal_hook, ssl_write_internal_org));
+        assert(hook_fn("SSL_set_fd", &SSL_set_fd_hook, SSL_set_fd_org));
+        assert(MH_ApplyQueued() == MH_OK);
+    }
+};
+static Init init = {};
+#else
 inline constexpr uint16_t Any = 0x0100u;
 inline constexpr uint16_t Cap = 0x0200u;
 template <uint16_t... ops>
@@ -174,6 +207,17 @@ inline auto Search(std::vector<uint8_t> const& data) noexcept {
         }
         return result;
     } (data.data(), data.size());
+}
+
+template<typename T>
+static bool hook_fn(uintptr_t addr, T* hook, T*& org) noexcept {
+    if (MH_CreateHook((void*)(addr), (void*)hook, (void**)&org) != MH_OK) {
+        return false;
+    }
+    if (MH_EnableHook((void*)(addr)) != MH_OK) {
+        return false;
+    }
+    return true;
 }
 
 struct Config {
@@ -217,20 +261,8 @@ struct Config {
         assert(hook_fn(base + set_fd, &SSL_set_fd_hook, SSL_set_fd_org));
         assert(MH_ApplyQueued() == MH_OK);
     }
-
-    template<typename T>
-    static bool hook_fn(uintptr_t addr, T* hook, T*& org) noexcept {
-        if (MH_CreateHook((void*)(addr), (void*)hook, (void**)&org) != MH_OK) {
-            return false;
-        }
-        if (MH_EnableHook((void*)(addr)) != MH_OK) {
-            return false;
-        }
-        return true;
-    }
 };
 
-#ifdef WIN32
 BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     if (reason != DLL_PROCESS_ATTACH) {
         return TRUE;
@@ -243,7 +275,6 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
             exit(1);
         }
     }
-    folder = std::filesystem::absolute(folder);
     if (!logger.open_folder(folder)) {
         exit(1);
     }
@@ -323,6 +354,4 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     config.apply(base);
     return TRUE;
 }
-#else
 #endif
-
