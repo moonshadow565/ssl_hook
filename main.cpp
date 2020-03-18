@@ -23,6 +23,10 @@ static_assert(sizeof(void*) == 4, "Compile in 32bit mode");
 static_assert(sizeof(void*) == 8, "Compile in 64bit mode only!");
 #error "implement GetBaseAddress for not WIN32"
 #endif
+#ifdef assert
+#undef assert
+#endif
+#define assert(what) do { if (!(what)) { logger.log_fail(#what); exit(1); } } while(false)
 
 struct Logger {
 private:
@@ -66,11 +70,12 @@ public:
     }
 
     void log_end() noexcept {
-        send({"start", 0, time(), 0, 0 }, nullptr);
+        send({"end", 0, time(), 0, 0 }, nullptr);
     }
 
     void log_fail(char const* desc) noexcept {
         send({"fail", 0, time(), 0, (uint32_t)strlen(desc) }, desc);
+        file.flush();
     }
 
     void log_read(void const* s, void const* data, size_t num, size_t size) noexcept {
@@ -153,7 +158,7 @@ extern "C" {
 inline constexpr uint16_t Any = 0x0100u;
 inline constexpr uint16_t Cap = 0x0200u;
 template <uint16_t... ops>
-inline auto Search( std::vector<uint8_t> const& data) noexcept {
+inline auto Search(std::vector<uint8_t> const& data) noexcept {
     return [](uint8_t const *start, size_t size) constexpr noexcept {
         std::array<uint8_t const *, ((ops & Cap ? 1 : 0) + ... + 1)> result = {};
         uint8_t const *const end = start + size + sizeof...(ops);
@@ -168,119 +173,156 @@ inline auto Search( std::vector<uint8_t> const& data) noexcept {
             }
         }
         return result;
-    }(data.data(), data.size());
+    } (data.data(), data.size());
 }
 
-template<typename T>
-static bool Hook(uintptr_t addr, T* hook, T*& org) noexcept {
-    if (MH_CreateHook((void*)(addr), (void*)hook, (void**)&org) != MH_OK) {
-        return false;
+struct Config {
+    uintptr_t read = 0;
+    uintptr_t write = 0;
+    uintptr_t set_fd = 0;
+    uintptr_t checksum = 0;
+
+    void load(std::filesystem::path const& folder, uintptr_t new_checksum) noexcept {
+        auto filename = (folder / ("config_" + std::to_string(new_checksum) + ".cfg")).string();
+        auto file = fopen(filename.c_str(), "rb");
+        if (!file) {
+            return;
+        }
+        fscanf(file, "v1 %p %p %p %p\n", (void**)&read, (void**)&write, (void**)&set_fd, (void**)&checksum);
+        fclose(file);
+        if (new_checksum != checksum) {
+            *this = {};
+        }
     }
-    if (MH_QueueEnableHook((void*)(addr)) != MH_OK) {
-        return false;
+
+    void save(std::filesystem::path const& folder) const noexcept {
+        auto filename = (folder / ("config_" + std::to_string(checksum) + ".cfg")).string();
+        auto file = fopen(filename.c_str(), "wb");
+        if (!file) {
+            return;
+        }
+        fprintf(file, "v1 %p %p %p %p\n", (void*)read, (void*)write, (void*)set_fd, (void*)checksum);
+        fclose(file);
     }
-    return true;
-}
 
-#ifdef WIN32
-static uintptr_t GetBaseAddress() noexcept {
-    return (uintptr_t)GetModuleHandleA(nullptr);
-}
-
-static std::vector<uint8_t> DumpData(uintptr_t base) noexcept {
-    constexpr size_t capacity = 64 * 1024 * 1024; // 64MB is plenty
-    constexpr size_t page_size = 0x1000;
-    static_assert(capacity % page_size == 0);
-    auto data = std::vector<uint8_t>{};
-    data.resize(capacity);
-    auto handle = GetCurrentProcess();
-    for (size_t i = 0; i != capacity; i += page_size) {
-        ReadProcessMemory(handle, (void const*)(base + i), &data[i], capacity, nullptr);
+    bool valid() const noexcept {
+        return checksum && read && write && set_fd;
     }
-    return data;
-}
 
-struct Init {
-    Init() {
-        if (!logger.open_folder("./ssl_logs")) {
-            exit(1);
+    void apply(uintptr_t base) const noexcept {
+        assert(valid());
+        assert(MH_Initialize() == MH_OK);
+        assert(hook_fn(base + read, &ssl_read_internal_hook, ssl_read_internal_org));
+        assert(hook_fn(base + write, &ssl_write_internal_hook, ssl_write_internal_org));
+        assert(hook_fn(base + set_fd, &SSL_set_fd_hook, SSL_set_fd_org));
+        assert(MH_ApplyQueued() == MH_OK);
+    }
+
+    template<typename T>
+    static bool hook_fn(uintptr_t addr, T* hook, T*& org) noexcept {
+        if (MH_CreateHook((void*)(addr), (void*)hook, (void**)&org) != MH_OK) {
+            return false;
         }
-        logger.log_start();
-        auto base = GetBaseAddress();
-        auto data = DumpData(base);
-        MH_Initialize();
-        if (auto const s = Search< // 0x6CDD50
-                0xB8, 0x14, 0x00, 0x00, 0x00,   // mov     eax, 14h
-                0xE8, Any, Any, Any, Any,       // call    j___alloca_probe
-                0x56,                           // push    esi
-                0x8B, 0x74, 0x24, 0x1C,         // mov     esi, [esp+18h+arg_0]
-                0x83, 0x7E, 0x18, 0x00,         // cmp     dword ptr [esi+18h], 0
-                0x75, 0x26,                     // jnz     $+5
-                0x68, Any, Any, Any, Any,       // push    ????
-                0x68, Any, Any, Any, Any,       // push    "ssl\\ssl_lib.c"
-                0x68, 0x14, 0x01, 0x00, 0x00,   // push    114h
-                0x68, 0x0B, 0x02, 0x00, 0x00,   // push    20Bh
-                0x6A, 0x14                      // push    14h
-                >(data); !s[0]) {
-            logger.log_fail("Search ssl_read_internal");
-            exit(1);
-        } else {
-            auto addr = (uintptr_t)(s[0] - data.data()) + base;
-            if(!Hook(addr, &ssl_read_internal_hook, ssl_read_internal_org)) {
-                logger.log_fail("Hook ssl_read_internal");
-                exit(1);
-            }
+        if (MH_EnableHook((void*)(addr)) != MH_OK) {
+            return false;
         }
-        if (auto const s = Search< // 0x6CE5D0
-                0xB8, 0x14, 0x00, 0x00, 0x00,   // mov     eax, 14h
-                0xE8, Any, Any, Any, Any,       // call    j___alloca_probe
-                0x56,                           // push    esi
-                0x8B, 0x74, 0x24, 0x1C,         // mov     esi, [esp+18h+arg_0]
-                0x83, 0x7E, 0x18, 0x00,         // cmp     dword ptr [esi+18h], 0
-                0x75, 0x26,                     // jnz     $+5
-                0x68, Any, Any, Any, Any,       // push    ????
-                0x68, Any, Any, Any, Any,       // push    offset aSslSslLibC ; "ssl\\ssl_lib.c"
-                0x68, 0x14, 0x01, 0x00, 0x00,   // push    114h
-                0x68, 0x0C, 0x02, 0x00, 0x00,   // push    20Ch
-                0x6A, 0x14                      // push    14h
-                >(data); !s[0]) {
-            logger.log_fail("Search ssl_write_internal");
-            exit(1);
-        } else {
-            auto addr = (uintptr_t)(s[0] - data.data()) + base;
-            if (!Hook(addr, &ssl_write_internal_hook, ssl_write_internal_org))  {
-                logger.log_fail("Hook ssl_write_internal");
-                exit(1);
-            }
-        }
-        if (auto const s = Search< // 0x6CC910
-                0x57,                           // push    edi
-                0xE8, Any, Any, Any, Any,       // call    BIO_s_socket
-                0x50,                           // push    eax
-                0xE8, Any, Any, Any, Any,       // call    BIO_new
-                0x8B, 0xF8,                     // mov     edi, eax
-                0x83, 0xC4, 04,                 // add     esp, 4
-                0x85, 0xFF,                     // test    edi, edi
-                0x75, 0x1F,                     // jnz     short loc_10024694
-                0x68, Any, Any, Any, Any,       // push    ???
-                0x68, Any, Any, Any, Any,       // push    "ssl\\ssl_lib.c"
-                0x6A, 0x07,                     // push    7
-                0x68, 0xC0, 0x00, 0x00, 0x00,   // push    0C0h
-                0x6A, 0x14                      // push    14h
-                >(data); !s[0]) {
-            logger.log_fail("Search SSL_set_fd");
-            exit(1);
-        } else {
-            auto addr = (uintptr_t)(s[0] - data.data()) + base;
-            if (!Hook(addr, &SSL_set_fd_hook, SSL_set_fd_org))  {
-                logger.log_fail("Hook SSL_set_fd");
-                exit(1);
-            }
-        }
-        MH_ApplyQueued();
+        return true;
     }
 };
+
+#ifdef WIN32
+BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
+    if (reason != DLL_PROCESS_ATTACH) {
+        return TRUE;
+    }
+    auto folder = std::filesystem::path("./ssl_logs");
+    if (!std::filesystem::exists(folder)) {
+        std::error_code ec = {};
+        std::filesystem::create_directories(folder, ec);
+        if (ec != std::errc{}) {
+            exit(1);
+        }
+    }
+    folder = std::filesystem::absolute(folder);
+    if (!logger.open_folder(folder)) {
+        exit(1);
+    }
+    logger.log_start();
+    auto base = (uintptr_t)GetModuleHandleA(nullptr);
+    auto handle = GetCurrentProcess();
+    auto checksum = uintptr_t{0};
+    auto size = size_t{0};
+    {
+        char raw[1024] = {};
+        assert(ReadProcessMemory(handle, (void const *)base, raw, sizeof(raw), nullptr));
+        auto const dos = (PIMAGE_DOS_HEADER)(raw);
+        assert(dos->e_magic == IMAGE_DOS_SIGNATURE);
+        auto const nt = (PIMAGE_NT_HEADERS32)(raw + dos->e_lfanew);
+        assert(nt->Signature == IMAGE_NT_SIGNATURE);
+        checksum = (uint32_t)(nt->OptionalHeader.CheckSum);
+        size = (size_t)(nt->OptionalHeader.SizeOfImage);
+    }
+    assert(checksum);
+    auto config = Config{};
+    config.load(folder, checksum);
+    if (!config.valid()) {
+        auto data = std::vector<uint8_t>(size);
+        for (size_t i = 0; i < (size + 0x1000); i += 0x1000) {
+            ReadProcessMemory(handle, (void const*)(base + i), data.data() + i, 0x1000, nullptr);
+        }
+        auto search_ssl_read = Search< //
+                               0xB8, 0x14, 0x00, 0x00, 0x00,   // mov   eax, 14h
+                               0xE8, Any, Any, Any, Any,       // call  j___alloca_probe
+                               0x56,                           // push  esi
+                               0x8B, 0x74, 0x24, 0x1C,         // mov   esi, [esp+18h+arg_0]
+                               0x83, 0x7E, 0x18, 0x00,         // cmp   dword ptr [esi+18h], 0
+                               0x75, 0x26,                     // jnz   $+5
+                               0x68, Any, Any, Any, Any,       // push  ????
+                               0x68, Any, Any, Any, Any,       // push  "ssl\\ssl_lib.c"
+                               0x68, 0x14, 0x01, 0x00, 0x00,   // push  114h
+                               0x68, 0x0B, 0x02, 0x00, 0x00,   // push  20Bh
+                               0x6A, 0x14                      // push  14h
+                               >(data);
+        assert(search_ssl_read[0]);
+        config.read = (uintptr_t)(search_ssl_read[0] - data.data());
+        auto search_ssl_write = Search< //
+                                0xB8, 0x14, 0x00, 0x00, 0x00,   // mov  eax, 14h
+                                0xE8, Any, Any, Any, Any,       // call j___alloca_probe
+                                0x56,                           // push esi
+                                0x8B, 0x74, 0x24, 0x1C,         // mov  esi, [esp+18h+arg_0]
+                                0x83, 0x7E, 0x18, 0x00,         // cmp  dword ptr [esi+18h], 0
+                                0x75, 0x26,                     // jnz  $+5
+                                0x68, Any, Any, Any, Any,       // push ????
+                                0x68, Any, Any, Any, Any,       // push "ssl\\ssl_lib.c"
+                                0x68, 0x14, 0x01, 0x00, 0x00,   // push 114h
+                                0x68, 0x0C, 0x02, 0x00, 0x00,   // push 20Ch
+                                0x6A, 0x14                      // push 14h
+                                >(data);
+        assert(search_ssl_write[0]);
+        config.write = (uintptr_t)(search_ssl_write[0] - data.data());
+        auto search_fd_set = Search< //
+                             0x57,                           // push edi
+                             0xE8, Any, Any, Any, Any,       // call BIO_s_socket
+                             0x50,                           // push eax
+                             0xE8, Any, Any, Any, Any,       // call BIO_new
+                             0x8B, 0xF8,                     // mov  edi, eax
+                             0x83, 0xC4, 04,                 // add  esp, 4
+                             0x85, 0xFF,                     // test edi, edi
+                             0x75, 0x1F,                     // jnz  short loc_10024694
+                             0x68, Any, Any, Any, Any,       // push ???
+                             0x68, Any, Any, Any, Any,       // push "ssl\\ssl_lib.c"
+                             0x6A, 0x07,                     // push 7
+                             0x68, 0xC0, 0x00, 0x00, 0x00,   // push 0C0h
+                             0x6A, 0x14                      // push 14h
+                             >(data);
+        assert(search_fd_set[0]);
+        config.set_fd = (uintptr_t)(search_fd_set[0] - data.data());
+        config.checksum = checksum;
+        config.save(folder);
+    }
+    config.apply(base);
+    return TRUE;
+}
 #else
 #endif
 
-static Init init = {};
