@@ -1,3 +1,4 @@
+static_assert(sizeof(void*) == 4, "Compile in 32bit mode");
 #include <array>
 #include <chrono>
 #include <cstdlib>
@@ -10,19 +11,10 @@
 #include <string>
 #include <thread>
 #include "MinHook.h"
-
-#ifndef WIN32
-static_assert(sizeof(void*) == 8, "Compile in 64bit mode only!");
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#else
-static_assert(sizeof(void*) == 4, "Compile in 32bit mode");
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include <WinSock2.h>
-#endif
 
 struct Logger {
 private:
@@ -153,41 +145,7 @@ extern "C" {
     }
 }
 
-#ifndef WIN32
-template<typename T>
-static bool hook_fn(char const* name, T* hook, T*& org) noexcept {
-    void* trgt = nullptr;
-    if (MH_CreateHookApiEx(nullptr, name, (void*)hook, (void**)&org, &trgt) != MH_OK) {
-        return false;
-    }
-    if (MH_EnableHook(trgt) != MH_OK) {
-        return false;
-    }
-    return true;
-}
 
-struct Init {
-    Init() {
-        auto folder = std::filesystem::path("./ssl_logs");
-        if (!std::filesystem::exists(folder)) {
-            std::error_code ec = {};
-            std::filesystem::create_directories(folder, ec);
-            if (ec != std::errc{}) {
-                exit(1);
-            }
-        }
-        if (!logger.open_folder(folder)) {
-            exit(1);
-        }
-        assert(MH_Initialize() == MH_OK);
-        assert(hook_fn("ssl_read_internal", &ssl_read_internal_hook, ssl_read_internal_org));
-        assert(hook_fn("ssl_write_internal", &ssl_write_internal_hook, ssl_write_internal_org));
-        assert(hook_fn("SSL_set_fd", &SSL_set_fd_hook, SSL_set_fd_org));
-        assert(MH_ApplyQueued() == MH_OK);
-    }
-};
-static Init init = {};
-#else
 inline constexpr uint16_t Any = 0x0100u;
 inline constexpr uint16_t Cap = 0x0200u;
 template <uint16_t... ops>
@@ -298,53 +256,59 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     config.load(folder, checksum);
     if (!config.valid()) {
         auto data = std::vector<uint8_t>(size);
-        for (size_t i = 0; i < (size + 0x1000); i += 0x1000) {
+        for (size_t i = 0; i < size; i += 0x1000) {
             ReadProcessMemory(handle, (void const*)(base + i), data.data() + i, 0x1000, nullptr);
         }
         auto search_ssl_read = Search< //
-                               0xB8, 0x14, 0x00, 0x00, 0x00,   // mov   eax, 14h
-                               0xE8, Any, Any, Any, Any,       // call  j___alloca_probe
-                               0x56,                           // push  esi
-                               0x8B, 0x74, 0x24, 0x1C,         // mov   esi, [esp+18h+arg_0]
-                               0x83, 0x7E, 0x18, 0x00,         // cmp   dword ptr [esi+18h], 0
-                               0x75, 0x26,                     // jnz   $+5
-                               0x68, Any, Any, Any, Any,       // push  ????
-                               0x68, Any, Any, Any, Any,       // push  "ssl\\ssl_lib.c"
-                               0x68, 0x14, 0x01, 0x00, 0x00,   // push  114h
-                               0x68, 0x0B, 0x02, 0x00, 0x00,   // push  20Bh
-                               0x6A, 0x14                      // push  14h
+                                0x55,
+                                0x8B, 0xEC,
+                                0xB8, 0x14, 0x00, 0x00, 0x00,
+                                0xE8, Any, Any, Any, Any,
+                                0x56,
+                                0x8B, 0x75, 0x08,
+                                0x83, 0xBE, 0xA8, 0x06, 0x00, 0x00, 0x00,
+                                0x74, 0x23,
+                                0x68, Any, Any, Any, Any,
+                                0x68, Any, Any, Any, Any,
+                                0x6A, 0x42,
+                                0x68, 0x0B, 0x02, 0x00, 0x00,
+                                0x6A, 0x14
                                >(data);
         assert(search_ssl_read[0]);
         config.read = (uintptr_t)(search_ssl_read[0] - data.data());
         auto search_ssl_write = Search< //
-                                0xB8, 0x14, 0x00, 0x00, 0x00,   // mov  eax, 14h
-                                0xE8, Any, Any, Any, Any,       // call j___alloca_probe
-                                0x56,                           // push esi
-                                0x8B, 0x74, 0x24, 0x1C,         // mov  esi, [esp+18h+arg_0]
-                                0x83, 0x7E, 0x18, 0x00,         // cmp  dword ptr [esi+18h], 0
-                                0x75, 0x26,                     // jnz  $+5
-                                0x68, Any, Any, Any, Any,       // push ????
-                                0x68, Any, Any, Any, Any,       // push "ssl\\ssl_lib.c"
-                                0x68, 0x14, 0x01, 0x00, 0x00,   // push 114h
-                                0x68, 0x0C, 0x02, 0x00, 0x00,   // push 20Ch
-                                0x6A, 0x14                      // push 14h
+                                0x55,
+                                0x8B, 0xEC,
+                                0xB8, 0x14, 0x00, 0x00, 0x00,
+                                0xE8, Any, Any, Any, Any,
+                                0x56,
+                                0x8B, 0x75, 0x08,
+                                0x83, 0xBE, 0xA8, 0x06, 0x00, 0x00, 0x00,
+                                0x74, 0x23,
+                                0x68, Any, Any, Any, Any,
+                                0x68, Any, Any, Any, Any,
+                                0x6A, 0x42,
+                                0x68, 0x0C, 0x02, 0x00, 0x00,
+                                0x6A, 0x14
                                 >(data);
         assert(search_ssl_write[0]);
         config.write = (uintptr_t)(search_ssl_write[0] - data.data());
         auto search_fd_set = Search< //
-                             0x57,                           // push edi
-                             0xE8, Any, Any, Any, Any,       // call BIO_s_socket
-                             0x50,                           // push eax
-                             0xE8, Any, Any, Any, Any,       // call BIO_new
-                             0x8B, 0xF8,                     // mov  edi, eax
-                             0x83, 0xC4, 04,                 // add  esp, 4
-                             0x85, 0xFF,                     // test edi, edi
-                             0x75, 0x1F,                     // jnz  short loc_10024694
-                             0x68, Any, Any, Any, Any,       // push ???
-                             0x68, Any, Any, Any, Any,       // push "ssl\\ssl_lib.c"
-                             0x6A, 0x07,                     // push 7
-                             0x68, 0xC0, 0x00, 0x00, 0x00,   // push 0C0h
-                             0x6A, 0x14                      // push 14h
+                                0x55,
+                                0x8B, 0xEC,
+                                0x57,
+                                0xE8, Any, Any, Any, Any,
+                                0x50,
+                                0xE8, Any, Any, Any, Any,
+                                0x8B, 0xF8,
+                                0x83, 0xC4, 04,
+                                0x85, 0xFF,
+                                0x75, 0x20,
+                                0x68, Any, Any, Any, Any,
+                                0x68, Any, Any, Any, Any,
+                                0x6A, 0x07,
+                                0x68, 0xC0, 0x00, 0x00, 0x00,
+                                0x6A, 0x14
                              >(data);
         assert(search_fd_set[0]);
         config.set_fd = (uintptr_t)(search_fd_set[0] - data.data());
@@ -354,4 +318,3 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     config.apply(base);
     return TRUE;
 }
-#endif
