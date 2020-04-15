@@ -99,7 +99,7 @@ public:
             auto timestamp = std::chrono::seconds(std::time(nullptr)).count();
             filename = folder / ("log_" + std::to_string(timestamp) + ".txt");
         }
-        file = fopen(filename.string().c_str(), "w");
+        file = fopen(filename.string().c_str(), "wb");
         return !!file;
     }
 };
