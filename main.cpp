@@ -16,7 +16,6 @@ static_assert(sizeof(void*) == 4, "Compile in 32bit mode");
 #include <WinSock2.h>
 #define assert(what) do { if (!(what)) { logger.log_fail(#what); exit(1); } } while(false)
 
-
 struct Logger {
 private:
     std::chrono::steady_clock clock = {};
@@ -51,6 +50,10 @@ public:
         fprintf(file, "end\n");
         fflush(file);
         fclose(file);
+    }
+
+    void log_module(char const* moduleName, uintptr_t base) noexcept {
+        fprintf(file, "module: %s, base: 0x%p\n", moduleName ? moduleName : "nullptr", base);
     }
 
     void log_fail(char const* desc) noexcept {
@@ -198,12 +201,13 @@ struct Hook {
         return true;
     }
 
-    static void hook_module(std::filesystem::path const& folder, char const* moduleName) {
-        auto base = (uintptr_t)GetModuleHandleA(moduleName);
+    static bool hook_module(std::filesystem::path const& folder, char const* moduleName) {
+        auto const base = (uintptr_t)GetModuleHandleA(moduleName);
         if (!base) {
-            return;
+            return false;
         }
-        auto handle = GetCurrentProcess();
+        logger.log_module(moduleName, base);
+        auto const handle = GetCurrentProcess();
         auto checksum = uintptr_t{ 0 };
         auto size = size_t{ 0 };
         {
@@ -285,6 +289,22 @@ struct Hook {
         assert(hook_fn(base + config.write, &ssl_write_internal_hook, ssl_write_internal_org));
         assert(hook_fn(base + config.set_fd, &SSL_set_fd_hook, SSL_set_fd_org));
         assert(MH_ApplyQueued() == MH_OK);
+        return true;
+    }
+
+    static void hook_module_wait(std::filesystem::path const& folder, char const* moduleName,
+                                 uint32_t interval, uint32_t timeout) {
+        auto thread = std::thread([=] {
+            uint32_t elapsed = 0;
+            while (!hook_module(folder, moduleName)) {
+                elapsed += interval;
+                if (timeout == 0 || elapsed >= timeout) {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(interval));
+            }
+        });
+        thread.detach();
     }
 };
 
@@ -305,6 +325,6 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
     }
     assert(MH_Initialize() == MH_OK);
     Hook<0>::hook_module(folder, nullptr);
-    Hook<1>::hook_module(folder, "Foundation.dll");
+    Hook<1>::hook_module_wait(folder, "Foundation.dll", 50, 30000);
     return TRUE;
 }
