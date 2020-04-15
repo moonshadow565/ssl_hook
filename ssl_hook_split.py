@@ -111,8 +111,9 @@ def write_connections(connections, dname):
         with open(fname, "wb") as io:
             for (time, i, direction), value in c.packets.items():
                 if direction == "read":
-                    io.write(b"\n<" + b"=" * 120 + b">\n")
+                    io.write(b"<" + b"=" * 120 + b">\n")
                 io.write(auto_ungzip(bytes(value)))
+                io.write(b"\n")
 src = sys.argv[1]
 dst = sys.argv[2] if 2 in sys.argv else src.replace(".txt", "")
 cons = read_connections(src)
