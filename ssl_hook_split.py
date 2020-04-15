@@ -4,8 +4,10 @@ import os
 import zlib
 import sys
 
-RE_IP = re.compile("\\w+: (0x[\\dA-F]+), address: ([\\d\\.]+), port: (\\d+), familiy: (\\d+)")
-RE_DATA = re.compile("(\\w+): (0x[\\dA-F]+), time: (\\d+), req: 0x([\\dA-F]+), got: 0x([\\dA-F]+)")
+RE_IP = re.compile("^\\w+: (0x[\\dA-F]+), address: ([\\d\\.]+), port: (\\d+), familiy: (\\d+)$")
+RE_DATA = re.compile("^(\\w+): (0x[\\dA-F]+), time: (\\d+), req: (0x[\\dA-F]+), got: (0x[\\dA-F]+)$")
+RE_LEN = re.compile(b'Content-Length: (\\d+)\r\n',  re.IGNORECASE)
+RE_GZIP = re.compile(b'Content-Encoding: gzip', re.IGNORECASE)
 
 class Connection:
     def __init__(self):
@@ -15,19 +17,19 @@ class Connection:
         self.packets = {}
 
 def auto_ungzip(data):
-    if not b": gzip" in data:
+    #return data
+    if not RE_GZIP.search(data):
         return data
     try:
-        sep = b"\r\n\r\n"
-        start = data.index(sep)
-        if start == -1:
-            return data
-        odata = data[start + len(sep):]
+        start = data.index(b"\r\n\r\n") + 4
+        m = RE_LEN.search(data)
+        odata = data[start:]
         ndata = zlib.decompress(odata, 32 + zlib.MAX_WBITS)
-        print("success")
-        return data[:start + len(sep)] + ndata
+        #print("success")
+        return data[:start] + ndata
     except Exception as e:
-        print(e)
+        ##print(data)
+        #print(e)
         return data
 
 
@@ -59,6 +61,7 @@ def read_connections(fname):
                 if cid not in results:
                     results[cid] = Connection()
                 c = results[cid]
+                c.family = family
                 if line.startswith("fd_peer"):
                     c.peer_ip = f"{address}_{port}"
                 else:
@@ -83,17 +86,20 @@ def read_connections(fname):
                 c.packets[key] = list(data)
                 continue
             raise ValueError(f"Unknown type: {line}");
-        for con in results.values():
+        for c in results.values():
             last_direction = ""
             last_packet = []
-            for key in list(con.packets.keys()):
+            npackets = {}
+            for key in sorted(c.packets.keys()):
                 direction = key[2]
-                value = con.packets[key]
+                value = c.packets[key]
                 if last_direction == direction:
                     last_packet.extend(value)
-                    del con.packets[key]
                 else:
+                    last_packet = value
                     last_direction = direction
+                    npackets[key] = value
+            c.packets = npackets
         return results
 
 
@@ -106,7 +112,7 @@ def write_connections(connections, dname):
             for (time, i, direction), value in c.packets.items():
                 if direction == "read":
                     io.write(b"\n<" + b"=" * 120 + b">\n")
-                    io.write(auto_ungzip(bytes(value)))
+                io.write(auto_ungzip(bytes(value)))
 src = sys.argv[1]
 dst = sys.argv[2] if 2 in sys.argv else src.replace(".txt", "")
 cons = read_connections(src)
