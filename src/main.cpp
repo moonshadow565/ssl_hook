@@ -60,10 +60,10 @@ struct Offsets {
         if (auto const found = find_ssl_write_internal(data, 0)) {
             ssl_write_internal = (std::uint32_t)std::get<1>(*found);
         }
-        if (auto file = fopen("./ssl_logs/dump.exe", "w+")) {
-            fwrite(data.data(), 1, data.size(), file);
-            fclose(file);
-        }
+//        if (auto file = fopen("./ssl_logs/dump.exe", "wb+")) {
+//            fwrite(data.data(), 1, data.size(), file);
+//            fclose(file);
+//        }
     }
 };
 
