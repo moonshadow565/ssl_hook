@@ -19,18 +19,18 @@ static_assert(sizeof(void*) == 4, "Compile in 32bit mode");
 
 constexpr auto find_SSL_set_fd = &ppp::any<
     R"(o[56] 8B 74 24 08 57 E8 ?? ?? ?? ?? 50 E8 ?? ?? ?? ?? 8B F8 83 C4 04 85 FF)"_pattern,
+    R"(o[56] 8B EC 57 E8 ?? ?? ?? ?? 50 E8 ?? ?? ?? ?? 8B F8 83 C4 04 85 FF 75 20 68 57 05 00 00)"_pattern,
     R"(E8 r[?? ?? ?? ??] 6A 00 6A 05 6A 21)"_pattern
     >;
+
 constexpr auto find_ssl_read_internal = &ppp::any<
-    R"(o[B8] 14 00 00 00 E8 ?? ?? ?? ?? 56 8B 74 24 1C 83 7E 18 00 75 26 68 C9 06 00 00)"_pattern
+    R"(o[B8] 14 00 00 00 E8 ?? ?? ?? ?? 56 8B 74 24 1C 83 7E 18 00 75 26 68 C9 06 00 00)"_pattern,
+    R"(o[55] 8B EC B8 14 00 00 00 E8 ?? ?? ?? ?? 56 8B 75 08 83 BE B0 06 00 00 00 74 23 68 D0 06 00 00)"_pattern
     >;
 constexpr auto find_ssl_write_internal = &ppp::any<
-    R"(o[B8] 14 00 00 00 E8 ?? ?? ?? ?? 56 8B 74 24 1C 83 7E 18 00 75 26 68 89 07 00 00)"_pattern
+    R"(o[B8] 14 00 00 00 E8 ?? ?? ?? ?? 56 8B 74 24 1C 83 7E 18 00 75 26 68 89 07 00 00)"_pattern,
+    R"(o[55] 8B EC B8 14 00 00 00 E8 ?? ?? ?? ?? 56 8B 75 08 83 BE B0 06 00 00 00 74 23 68 9C 07 00 00)"_pattern
     >;
-
-/*
-E8 ?? ?? ?? ?? 6A 00 6A 05 6A 21
-*/
 
 struct Offsets {
     std::uint32_t SSL_set_fd = 0;
@@ -209,11 +209,11 @@ struct Hook {
         auto thread = std::thread([=] {
             uint32_t elapsed = 0;
             while (!hook_module(moduleName)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(interval));
                 elapsed += interval;
                 if (timeout == 0 || elapsed >= timeout) {
                     break;
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(interval));
             }
         });
         thread.detach();
@@ -228,7 +228,7 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
         exit(1);
     }
     assert(MH_Initialize() == MH_OK);
-    Hook<0>::hook_module(nullptr);
-    // Hook<1>::hook_module_wait(nullptr, 50, 30000);
+    //Hook<0>::hook_module(nullptr);
+    Hook<1>::hook_module_wait("RiotClientFoundation.dll", 50, 30000);
     return TRUE;
 }
