@@ -228,7 +228,7 @@ BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
         exit(1);
     }
     assert(MH_Initialize() == MH_OK);
-    //Hook<0>::hook_module(nullptr);
-    Hook<1>::hook_module_wait("RiotClientFoundation.dll", 50, 30000);
+    Hook<0>::hook_module(nullptr);
+    // Hook<1>::hook_module_wait("RiotClientFoundation.dll", 50, 30000);
     return TRUE;
 }
