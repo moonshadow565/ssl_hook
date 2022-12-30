@@ -119,6 +119,7 @@ public:
         fprintf(file, "read: 0x%p, time: %llu, req: 0x%X, got: 0x%X\n", s, t, (uint32_t)num, (uint32_t)size);
         fwrite(data, 1, size, file);
         fwrite("\n", 1, 1, file);
+        fflush(file);
     }
 
     void log_write(void const* s, void const* data, size_t num, size_t size) noexcept {
@@ -127,6 +128,7 @@ public:
         fprintf(file, "write: 0x%p, time: %llu, req: 0x%X, got: 0x%X\n", s, t, (uint32_t)num, (uint32_t)size);
         fwrite(data, 1, size, file);
         fwrite("\n", 1, 1, file);
+        fflush(file);
     }
 
 
@@ -135,6 +137,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex);
         log_fd_impl<&getpeername>("fd_peer", s, fd, t);
         log_fd_impl<&getsockname>("fd_sock", s, fd, t);
+        fflush(file);
     }
 
     bool open_folder(std::filesystem::path folder) noexcept {
@@ -144,6 +147,7 @@ public:
         auto timestamp = std::chrono::seconds(std::time(nullptr)).count();
         auto filename = folder / ("log_" + std::to_string(timestamp) + ".txt");
         file = fopen(filename.string().c_str(), "wb");
+        setbuf(file, nullptr);
         return !!file;
     }
 } logger = {};
