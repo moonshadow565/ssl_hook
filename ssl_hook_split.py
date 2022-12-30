@@ -109,14 +109,24 @@ def write_connections(connections, dname):
         family, sock, peer = c.family, c.sock_ip, c.peer_ip
         fname = f"{dname}/{cid}-{family}-{sock}-{peer}.txt"
         last_direction = None
+        last_data = bytearray()
         with open(fname, "wb") as io:
             for (time, i, direction), value in c.packets.items():
-                if direction != last_direction:
-                    c = direction[0].encode('ascii')
-                    io.write(b"<" + c + b"=" * 120 + c + b">\n")
-                io.write(auto_ungzip(bytes(value)))
-                io.write(b"\n")
+                if last_direction and last_direction != direction:
+                    data = auto_ungzip(bytes(last_data))
+                    io.write(f"{direction} {len(data)} ".encode('ascii') + b"=" * 100 + b'\n')
+                    io.write(data)
+                    io.write(b"\n")
+                    last_data.clear()
                 last_direction = direction
+                last_data.extend(value)
+            if last_direction:
+                data = auto_ungzip(bytes(last_data))
+                io.write(f"{direction} {len(data)} ".encode('ascii') + b"=" * 100 + b'\n')
+                io.write(data)
+                io.write(b"\n")
+
+
 src = sys.argv[1]
 dst = sys.argv[2] if 2 in sys.argv else src.replace(".txt", "")
 cons = read_connections(src)
