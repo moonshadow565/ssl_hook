@@ -1,6 +1,6 @@
 #!python
 from __future__ import annotations
-from typing import IO, Literal, Mapping, Callable, Tuple
+from typing import IO, Literal, Mapping, Callable, Optional, Tuple
 from time import sleep
 import re
 import sys
@@ -179,9 +179,17 @@ def process_hook(ProcessBuffer: ProcessBuffer):
             case _:
                 raise ValueError("hook error: " + line)
 
-def read_rtmp_from_hook(source: IO, delay: float):
+def get_processor(data: bytes, filters: set):
+    if len(data) in {1, 0x601, 0xC01} and data[0] == 0x03:
+        if filters and not 'rtmp' in filters: return None
+        return ProcessBuffer(process_rtmp)
+    # TODO: add http processor
+    return None
+
+def read_rtmp_from_hook(source: IO, delay: float, filters: set):
     prerunner = ProcessBuffer(process_hook)
     runners = {}
+    last_header = ''
     while True:
         chunk = source.read(0x1000)
         if not chunk:
@@ -190,14 +198,15 @@ def read_rtmp_from_hook(source: IO, delay: float):
             sleep(delay)
         for (op, fid, time, sock, peer, data) in prerunner(chunk):
             key = (fid, op)
-            if not key in runners:
-                if not len(data) in {1, 0x601, 0xC01} or data[0] != 0x03:
-                    runners[key] = None
-                else:
-                    runners[key] = ProcessBuffer(process_rtmp)
+            if not key in runners: runners[key] = get_processor(data, filters)
             if runner := runners[key]:
+                header = f"{hex(fid)} - {sock} {'<' if op[0] == 'r' else '>'} {peer}"
+                shown_header = False
                 for result in runner(data):
-                    print(f"{hex(fid)} - {sock} {'<' if op[0] == 'r' else '>'} {peer}")
+                    if not shown_header and last_header != header:
+                        last_header = header
+                        shown_header = True
+                        print(header)
                     print(result)
 
 # File or - for stdin
@@ -208,4 +217,7 @@ if len(sys.argv) > 1 or sys.argv[1] == '-':
 delay = 0
 if len(sys.argv) > 2 and sys.argv[2] != '0':
     delay = float(sys.argv[2])
-read_rtmp_from_hook(file, delay)
+filters = []
+if len(sys.argv) > 3 and sys.argv[3] != '':
+    filters = sys.argv[3].split(',')
+read_rtmp_from_hook(file, delay, set(filters))
